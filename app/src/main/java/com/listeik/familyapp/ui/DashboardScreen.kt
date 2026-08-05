@@ -1,7 +1,9 @@
 package com.listeik.familyapp.ui
 
 import android.graphics.Color.parseColor
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,10 +52,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.listeik.familyapp.R
 import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
 import com.listeik.familyapp.data.model.FamilyMember
@@ -120,6 +125,7 @@ internal fun DashboardScreen(
             item {
                 FoodWidget(
                     items = food,
+                    events = events,
                     session = session,
                     memberById = memberById,
                     onAdjustPortions = onAdjustFoodPortions,
@@ -299,6 +305,7 @@ private fun MemberAvatarRow(members: List<FamilyMember>, fallbackName: String) {
 @Composable
 private fun FoodWidget(
     items: List<FamilyItem>,
+    events: List<ActivityEvent>,
     session: FamilySession,
     memberById: Map<String, FamilyMember>,
     onAdjustPortions: (FamilyItem, Int) -> Unit,
@@ -321,6 +328,16 @@ private fun FoodWidget(
                 FoodInventoryRow(
                     item = item,
                     updatedBy = memberById[item.updatedBy],
+                    recentEaters = events
+                        .asSequence()
+                        .filter { event ->
+                            event.itemId == item.id && event.text.contains("съел порцию")
+                        }
+                        .mapNotNull { memberById[it.actorId] }
+                        .distinctBy(FamilyMember::uid)
+                        .take(3)
+                        .toList(),
+                    showPhoto = item.title.contains("борщ", ignoreCase = true),
                     canDelete = item.createdBy == session.userId,
                     onAdjustPortions = onAdjustPortions,
                     onMoveForward = onMoveForward,
@@ -336,6 +353,8 @@ private fun FoodWidget(
 private fun FoodInventoryRow(
     item: FamilyItem,
     updatedBy: FamilyMember?,
+    recentEaters: List<FamilyMember>,
+    showPhoto: Boolean,
     canDelete: Boolean,
     onAdjustPortions: (FamilyItem, Int) -> Unit,
     onMoveForward: (FamilyItem) -> Unit,
@@ -372,6 +391,40 @@ private fun FoodInventoryRow(
                         Icons.Default.DeleteOutline,
                         contentDescription = "Удалить ${item.title}",
                         modifier = Modifier.size(19.dp),
+                    )
+                }
+            }
+        }
+        if (showPhoto) {
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(168.dp)
+                    .clip(RoundedCornerShape(22.dp)),
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.borscht_card),
+                    contentDescription = "Борщ",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.94f),
+                    shadowElevation = 2.dp,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(12.dp),
+                ) {
+                    Text(
+                        text = if (total != null && remaining != null) {
+                            "Доступно: $remaining из $total порций"
+                        } else {
+                            "Готово"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = accent,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                     )
                 }
             }
@@ -418,6 +471,26 @@ private fun FoodInventoryRow(
                     accent = accent,
                     onClick = { onAdjustPortions(item, 1) },
                 )
+            }
+            if (recentEaters.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Последними брали:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        recentEaters.forEach { member ->
+                            MemberAvatar(
+                                name = member.name,
+                                color = avatarColor(member.avatarColor),
+                                size = 28,
+                            )
+                        }
+                    }
+                }
             }
         } else {
             Spacer(Modifier.height(10.dp))
@@ -658,7 +731,10 @@ private fun WidgetDivider() {
 @Composable
 private fun MemberAvatar(name: String, color: Color, size: Int) {
     Box(
-        modifier = Modifier.size(size.dp).background(color, CircleShape),
+        modifier = Modifier
+            .size(size.dp)
+            .border(2.dp, MaterialTheme.colorScheme.surface.copy(alpha = 0.92f), CircleShape)
+            .background(color, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
         Text(

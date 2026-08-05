@@ -1,5 +1,12 @@
 package com.listeik.familyapp.ui
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.PersistableBundle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -26,19 +33,28 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Redeem
 import androidx.compose.material.icons.filled.Restaurant
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -51,6 +67,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -73,14 +90,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
+import com.listeik.familyapp.data.model.FamilyMember
 import com.listeik.familyapp.data.model.FamilyMessage
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
@@ -91,12 +109,13 @@ import java.util.Locale
 private enum class HomeTab(val label: String, val icon: ImageVector) {
     BOARD("Главная", Icons.Default.Home),
     CHAT("Чат", Icons.Default.ChatBubbleOutline),
-    ACTIVITY("История", Icons.Default.History),
+    ACTIVITY("События", Icons.Default.CalendarMonth),
+    PROFILE("Профиль", Icons.Default.Person),
 }
 
 private enum class OnboardingMode(val label: String) {
     CREATE("Создать семью"),
-    JOIN("Войти по коду"),
+    JOIN("Войти по приглашению"),
 }
 
 @Composable
@@ -129,6 +148,12 @@ fun FamilyApp(viewModel: FamilyViewModel) {
                 onCreateFamily = viewModel::createFamily,
                 onJoinFamily = viewModel::joinFamily,
             )
+            state.securityState?.isReady != true -> SecuritySetupScreen(
+                state = state,
+                onEnableEncryption = viewModel::enableEncryption,
+                onImportSecurityKey = viewModel::importSecurityKey,
+                onLeaveFamily = viewModel::leaveFamily,
+            )
             else -> FamilyHome(
                 state = state,
                 onCreateItem = viewModel::createItem,
@@ -137,6 +162,7 @@ fun FamilyApp(viewModel: FamilyViewModel) {
                 onSetItemCompleted = viewModel::setItemCompleted,
                 onDeleteItem = viewModel::deleteItem,
                 onSendMessage = viewModel::sendMessage,
+                onLeaveFamily = viewModel::leaveFamily,
             )
         }
         SnackbarHost(
@@ -188,6 +214,115 @@ private fun LoadingScreen() {
         contentAlignment = Alignment.Center,
     ) {
         LinearProgressIndicator(modifier = Modifier.width(180.dp))
+    }
+}
+
+@Composable
+private fun SecuritySetupScreen(
+    state: FamilyUiState,
+    onEnableEncryption: () -> Unit,
+    onImportSecurityKey: (String) -> Unit,
+    onLeaveFamily: () -> Unit,
+) {
+    val session = requireNotNull(state.session)
+    val canEnable = state.securityState?.canEnable == true
+    var secureInvite by rememberSaveable { mutableStateOf("") }
+    var confirmLeave by rememberSaveable { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(familyBackgroundBrush())
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp, vertical = 40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.size(80.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Default.Shield, contentDescription = null, modifier = Modifier.size(40.dp))
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        Text("Защита семейных данных", style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            session.familyName,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            if (canEnable) {
+                "Создайте семейный ключ на этом устройстве. После этого отправьте новое защищенное приглашение остальным участникам."
+            } else {
+                "Вставьте полное приглашение FH1 от участника семьи, у которого уже есть ключ."
+            },
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.widthIn(max = 520.dp),
+        )
+        Spacer(Modifier.height(24.dp))
+
+        Column(modifier = Modifier.widthIn(max = 520.dp)) {
+            if (canEnable) {
+                Button(
+                    onClick = onEnableEncryption,
+                    enabled = !state.isWorking,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Icon(Icons.Default.Lock, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Зашифровать семью")
+                }
+                Spacer(Modifier.height(20.dp))
+            }
+            OutlinedTextField(
+                value = secureInvite,
+                onValueChange = { secureInvite = it.trim().take(160) },
+                label = { Text("Защищенное приглашение") },
+                placeholder = { Text("FH1.XXXXXX...") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = { onImportSecurityKey(secureInvite) },
+                enabled = !state.isWorking && secureInvite.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Text("Импортировать ключ")
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = { confirmLeave = true },
+                enabled = !state.isWorking,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Выйти из семьи")
+            }
+            if (state.isWorking) {
+                Spacer(Modifier.height(14.dp))
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+
+    if (confirmLeave) {
+        LeaveFamilyDialog(
+            familyName = session.familyName,
+            onDismiss = { confirmLeave = false },
+            onConfirm = {
+                confirmLeave = false
+                onLeaveFamily()
+            },
+        )
     }
 }
 
@@ -267,9 +402,9 @@ private fun OnboardingScreen(
             } else {
                 OutlinedTextField(
                     value = inviteCode,
-                    onValueChange = { inviteCode = it.uppercase().take(6) },
-                    label = { Text("Код приглашения") },
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                    onValueChange = { inviteCode = it.trim().take(160) },
+                    label = { Text("Защищенное приглашение") },
+                    placeholder = { Text("FH1.XXXXXX...") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -306,26 +441,46 @@ private fun FamilyHome(
     onSetItemCompleted: (FamilyItem, Boolean) -> Unit,
     onDeleteItem: (FamilyItem) -> Unit,
     onSendMessage: (String) -> Unit,
+    onLeaveFamily: () -> Unit,
 ) {
     val session = requireNotNull(state.session)
     var selectedTab by rememberSaveable { mutableStateOf(HomeTab.BOARD) }
     var showCreateDialog by rememberSaveable { mutableStateOf(false) }
+    var lastSeenMessageCount by rememberSaveable { mutableStateOf(0) }
+
+    LaunchedEffect(selectedTab, state.messages.size) {
+        if (selectedTab == HomeTab.CHAT) {
+            lastSeenMessageCount = state.messages.size
+        }
+    }
 
     Scaffold(
         topBar = {
             Column {
                 CenterAlignedTopAppBar(
                     title = {
-                        Text(
-                            when (selectedTab) {
-                                HomeTab.BOARD -> "Домашний круг"
-                                HomeTab.CHAT -> "Семейный чат"
-                                HomeTab.ACTIVITY -> "История"
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            fontWeight = FontWeight.SemiBold,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.size(36.dp),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Default.Group,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp),
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                "FamilyHub",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
                     },
                 )
                 if (state.isWorking) {
@@ -339,7 +494,18 @@ private fun FamilyHome(
                     NavigationBarItem(
                         selected = selectedTab == tab,
                         onClick = { selectedTab = tab },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
+                        icon = {
+                            if (
+                                tab == HomeTab.CHAT &&
+                                state.messages.size > lastSeenMessageCount
+                            ) {
+                                BadgedBox(badge = { Badge() }) {
+                                    Icon(tab.icon, contentDescription = tab.label)
+                                }
+                            } else {
+                                Icon(tab.icon, contentDescription = tab.label)
+                            }
+                        },
                         label = { Text(tab.label) },
                     )
                 }
@@ -375,6 +541,13 @@ private fun FamilyHome(
                 contentPadding = padding,
             )
             HomeTab.ACTIVITY -> ActivityScreen(state.events, padding)
+            HomeTab.PROFILE -> ProfileScreen(
+                session = session,
+                members = state.members,
+                secureInvite = state.secureInvite.orEmpty(),
+                onLeaveFamily = onLeaveFamily,
+                contentPadding = padding,
+            )
         }
     }
 
@@ -574,6 +747,216 @@ private fun EventRow(event: ActivityEvent) {
             }
         }
     }
+}
+
+@Composable
+private fun ProfileScreen(
+    session: FamilySession,
+    members: List<FamilyMember>,
+    secureInvite: String,
+    onLeaveFamily: () -> Unit,
+    contentPadding: PaddingValues,
+) {
+    val context = LocalContext.current
+    var confirmLeave by rememberSaveable { mutableStateOf(false) }
+    val maskedInvite = if (secureInvite.length > 30) {
+        secureInvite.take(18) + "..." + secureInvite.takeLast(8)
+    } else {
+        secureInvite
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(familyBackgroundBrush()),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            top = contentPadding.calculateTopPadding() + 16.dp,
+            end = 16.dp,
+            bottom = contentPadding.calculateBottomPadding() + 24.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item {
+            Column(modifier = Modifier.padding(horizontal = 4.dp)) {
+                Text("Профиль", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    session.userName,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
+                            modifier = Modifier.size(48.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.Shield, contentDescription = null)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Сквозное шифрование", style = MaterialTheme.typography.titleLarge)
+                            Text(
+                                "Ключ хранится только на устройствах семьи",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    Text("Защищенное приглашение", style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        maskedInvite,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { copySecureInvite(context, secureInvite) },
+                            enabled = secureInvite.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Копировать")
+                        }
+                        OutlinedButton(
+                            onClick = { shareSecureInvite(context, secureInvite) },
+                            enabled = secureInvite.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Поделиться")
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                ),
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(session.familyName, style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Код семьи ${session.inviteCode}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    members.forEach { member ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surface,
+                                modifier = Modifier.size(38.dp),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        member.name.firstOrNull()?.uppercase() ?: "?",
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Text(member.name, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = { confirmLeave = true },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Выйти из семьи")
+            }
+        }
+    }
+
+    if (confirmLeave) {
+        LeaveFamilyDialog(
+            familyName = session.familyName,
+            onDismiss = { confirmLeave = false },
+            onConfirm = {
+                confirmLeave = false
+                onLeaveFamily()
+            },
+        )
+    }
+}
+
+private fun copySecureInvite(context: Context, secureInvite: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    val clip = ClipData.newPlainText("FamilyHub", secureInvite)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        clip.description.extras = PersistableBundle().apply {
+            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+        }
+    }
+    clipboard.setPrimaryClip(clip)
+}
+
+private fun shareSecureInvite(context: Context, secureInvite: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(
+            Intent.EXTRA_TEXT,
+            "Защищенное приглашение в FamilyHub:\n$secureInvite",
+        )
+    }
+    context.startActivity(Intent.createChooser(intent, "Пригласить в семью"))
+}
+
+@Composable
+private fun LeaveFamilyDialog(
+    familyName: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null) },
+        title = { Text("Выйти из семьи?") },
+        text = {
+            Text("Доступ к данным семьи «$familyName» и локальный ключ будут удалены с устройства.")
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("Выйти")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        },
+        shape = RoundedCornerShape(28.dp),
+    )
 }
 
 @Composable
