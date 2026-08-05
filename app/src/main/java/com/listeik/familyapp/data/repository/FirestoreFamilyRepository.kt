@@ -12,9 +12,13 @@ import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
 import com.listeik.familyapp.data.model.FamilyMember
 import com.listeik.familyapp.data.model.FamilyMessage
+import com.listeik.familyapp.data.model.FamilySecurityState
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
 import com.listeik.familyapp.data.model.ItemStatus
+import com.listeik.familyapp.data.security.FamilyCipher
+import com.listeik.familyapp.data.security.FamilyKeyStore
+import com.listeik.familyapp.data.security.SecureInvite
 import com.listeik.familyapp.data.session.SessionStore
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -26,6 +30,8 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
     private val auth = FirebaseAuth.getInstance()
     private val db = FirebaseFirestore.getInstance()
     private val sessionStore = SessionStore(context)
+    private val familyKeyStore = FamilyKeyStore(context)
+    private val familyCipher = FamilyCipher()
 
     override suspend fun ensureSignedIn(): String {
         val currentUser = auth.currentUser
@@ -45,6 +51,8 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
         val inviteCode = generateInviteCode()
         val inviteRef = db.collection(COLLECTION_INVITES).document(inviteCode)
         val memberRef = familyRef.collection(COLLECTION_MEMBERS).document(userId)
+        val familyKey = familyCipher.generateKey()
+        val keyCheck = familyCipher.keyCheck(familyKey)
         val now = FieldValue.serverTimestamp()
 
         val batch = db.batch()
@@ -54,24 +62,42 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
                 "code" to inviteCode,
                 "familyId" to familyRef.id,
                 "createdBy" to userId,
+                "encryptionVersion" to FamilyCipher.ENCRYPTION_VERSION,
+                "keyCheck" to keyCheck,
                 "createdAt" to now,
             ),
         )
         batch.set(
             familyRef,
             mapOf(
-                "name" to familyName.trim(),
+                "name" to encryptField(
+                    familyKey,
+                    familyRef.id,
+                    COLLECTION_FAMILIES,
+                    familyRef.id,
+                    "name",
+                    familyName.trim(),
+                ),
                 "inviteCode" to inviteCode,
                 "createdBy" to userId,
+                "encryptionVersion" to FamilyCipher.ENCRYPTION_VERSION,
+                "keyCheck" to keyCheck,
                 "createdAt" to now,
                 "updatedAt" to now,
             ),
         )
         batch.set(
             memberRef,
-            memberData(userId = userId, userName = userName, inviteCode = inviteCode),
+            memberData(
+                familyId = familyRef.id,
+                userId = userId,
+                userName = userName,
+                inviteCode = inviteCode,
+                familyKey = familyKey,
+            ),
         )
         batch.commit().await()
+        familyKeyStore.save(familyRef.id, familyKey)
 
         val session = FamilySession(
             familyId = familyRef.id,
@@ -86,18 +112,39 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
         return session
     }
 
-    override suspend fun joinFamily(inviteCode: String, userName: String): FamilySession {
+    override suspend fun joinFamily(secureInvite: String, userName: String): FamilySession {
         val userId = ensureSignedIn()
-        val normalizedCode = inviteCode.trim().uppercase()
+        val parsedInvite = SecureInvite.parse(secureInvite)
+        val normalizedCode = parsedInvite.inviteCode
         val invite = db.collection(COLLECTION_INVITES).document(normalizedCode).get().await()
         val familyId = invite.getString("familyId")
             ?: error("Семья с таким кодом не найдена")
+        val expectedKeyCheck = invite.getString("keyCheck")
+            ?: error("Создатель семьи еще не включил защищенные приглашения")
+        require(familyCipher.keyCheck(parsedInvite.familyKey) == expectedKeyCheck) {
+            "Защищенное приглашение не подходит к этой семье"
+        }
         val familyRef = db.collection(COLLECTION_FAMILIES).document(familyId)
         val memberRef = familyRef.collection(COLLECTION_MEMBERS).document(userId)
 
-        memberRef.set(memberData(userId = userId, userName = userName, inviteCode = normalizedCode)).await()
+        memberRef.set(
+            memberData(
+                familyId = familyId,
+                userId = userId,
+                userName = userName,
+                inviteCode = normalizedCode,
+                familyKey = parsedInvite.familyKey,
+            ),
+        ).await()
         val family = familyRef.get().await()
-        val familyName = family.getString("name") ?: "Семья"
+        val familyName = decryptField(
+            parsedInvite.familyKey,
+            familyId,
+            COLLECTION_FAMILIES,
+            familyId,
+            "name",
+            family.getString("name") ?: "Семья",
+        )
 
         val session = FamilySession(
             familyId = familyId,
@@ -106,10 +153,102 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
             userId = userId,
             userName = userName.trim(),
         )
+        familyKeyStore.save(familyId, parsedInvite.familyKey)
         sessionStore.save(session)
         saveTokenIfAvailable(session.familyId)
         addEvent(session, "${session.userName} присоединился к семье", null)
         return session
+    }
+
+    override suspend fun getSecurityState(session: FamilySession): FamilySecurityState {
+        val family = familyDoc(session.familyId).get().await()
+        val isEnabled =
+            (family.getLong("encryptionVersion") ?: 0L) >= FamilyCipher.ENCRYPTION_VERSION
+        val expectedKeyCheck = family.getString("keyCheck")
+        val localKey = familyKeyStore.load(session.familyId)
+        val hasValidLocalKey = localKey != null &&
+            (!isEnabled || expectedKeyCheck == familyCipher.keyCheck(localKey))
+        if (localKey != null && !hasValidLocalKey) {
+            familyKeyStore.remove(session.familyId)
+        }
+        return FamilySecurityState(
+            isEnabled = isEnabled,
+            hasLocalKey = hasValidLocalKey,
+            canEnable = !isEnabled && family.getString("createdBy") == session.userId,
+        )
+    }
+
+    override suspend fun enableEncryption(session: FamilySession) {
+        val familyRef = familyDoc(session.familyId)
+        val family = familyRef.get().await()
+        require(family.getString("createdBy") == session.userId) {
+            "Включить защиту может создатель семьи"
+        }
+        require((family.getLong("encryptionVersion") ?: 0L) < FamilyCipher.ENCRYPTION_VERSION) {
+            "Защита семьи уже включена. Импортируйте защищенное приглашение"
+        }
+
+        val familyKey = familyKeyStore.load(session.familyId) ?: familyCipher.generateKey()
+        val keyCheck = familyCipher.keyCheck(familyKey)
+        familyKeyStore.save(session.familyId, familyKey)
+        migrateLegacyContent(session, familyKey)
+
+        val inviteRef = db.collection(COLLECTION_INVITES).document(session.inviteCode)
+        val batch = db.batch()
+        batch.update(
+            inviteRef,
+            mapOf(
+                "encryptionVersion" to FamilyCipher.ENCRYPTION_VERSION,
+                "keyCheck" to keyCheck,
+            ),
+        )
+        batch.update(
+            familyRef,
+            mapOf(
+                "name" to encryptField(
+                    familyKey,
+                    session.familyId,
+                    COLLECTION_FAMILIES,
+                    session.familyId,
+                    "name",
+                    family.getString("name") ?: session.familyName,
+                ),
+                "encryptionVersion" to FamilyCipher.ENCRYPTION_VERSION,
+                "keyCheck" to keyCheck,
+                "updatedAt" to FieldValue.serverTimestamp(),
+            ),
+        )
+        batch.commit().await()
+        migrateLegacyContent(session, familyKey)
+    }
+
+    override suspend fun importSecurityKey(session: FamilySession, secureInvite: String) {
+        val parsedInvite = SecureInvite.parse(secureInvite)
+        require(parsedInvite.inviteCode == session.inviteCode) {
+            "Это приглашение от другой семьи"
+        }
+        val family = familyDoc(session.familyId).get().await()
+        val expectedKeyCheck = family.getString("keyCheck")
+            ?: error("Защита этой семьи еще не включена")
+        require(familyCipher.keyCheck(parsedInvite.familyKey) == expectedKeyCheck) {
+            "Защищенное приглашение не подходит к этой семье"
+        }
+        familyKeyStore.save(session.familyId, parsedInvite.familyKey)
+    }
+
+    override fun getSecureInvite(session: FamilySession): String? =
+        familyKeyStore.load(session.familyId)?.let {
+            SecureInvite.create(session.inviteCode, it)
+        }
+
+    override suspend fun leaveFamily(session: FamilySession) {
+        familyDoc(session.familyId)
+            .collection(COLLECTION_MEMBERS)
+            .document(session.userId)
+            .delete()
+            .await()
+        familyKeyStore.remove(session.familyId)
+        sessionStore.clear()
     }
 
     override suspend fun saveMessagingToken(familyId: String, token: String) {
@@ -134,11 +273,19 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
         portions: Int?,
     ) {
         val itemRef = familyDoc(session.familyId).collection(COLLECTION_ITEMS).document()
+        val familyKey = requireFamilyKey(session.familyId)
         val cleanPortions = portions?.coerceIn(1, 100)
         val data = mutableMapOf<String, Any?>(
             "id" to itemRef.id,
             "familyId" to session.familyId,
-            "title" to title.trim(),
+            "title" to encryptField(
+                familyKey,
+                session.familyId,
+                COLLECTION_ITEMS,
+                itemRef.id,
+                "title",
+                title.trim(),
+            ),
             "category" to category.name,
             "status" to category.defaultStatus.name,
             "createdBy" to session.userId,
@@ -184,6 +331,7 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
         require(item.category == ItemCategory.FOOD && delta in setOf(-1, 1))
         val itemRef = familyDoc(session.familyId).collection(COLLECTION_ITEMS).document(item.id)
         val eventRef = familyDoc(session.familyId).collection(COLLECTION_EVENTS).document()
+        val familyKey = requireFamilyKey(session.familyId)
 
         db.runTransaction { transaction ->
             val snapshot = transaction.get(itemRef)
@@ -200,6 +348,8 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
                 else -> ItemStatus.IN_PROGRESS
             }
             val action = if (delta < 0) "съел порцию" else "вернул порцию"
+            val eventText =
+                "${session.userName} $action: ${item.title} · осталось $next из $total".take(240)
 
             transaction.update(
                 itemRef,
@@ -216,7 +366,14 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
                     "id" to eventRef.id,
                     "familyId" to session.familyId,
                     "actorId" to session.userId,
-                    "text" to "${session.userName} $action: ${item.title} · осталось $next из $total".take(240),
+                    "text" to encryptField(
+                        familyKey,
+                        session.familyId,
+                        COLLECTION_EVENTS,
+                        eventRef.id,
+                        "text",
+                        eventText,
+                    ),
                     "itemId" to item.id,
                     "createdAt" to FieldValue.serverTimestamp(),
                 ),
@@ -243,6 +400,12 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
 
         val itemRef = familyDoc(session.familyId).collection(COLLECTION_ITEMS).document(item.id)
         val eventRef = familyDoc(session.familyId).collection(COLLECTION_EVENTS).document()
+        val familyKey = requireFamilyKey(session.familyId)
+        val eventText = (if (completed) {
+            "${session.userName} завершил: ${item.title}"
+        } else {
+            "${session.userName} вернул в список: ${item.title}"
+        }).take(240)
         val batch = db.batch()
         batch.update(
             itemRef,
@@ -258,11 +421,14 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
                 "id" to eventRef.id,
                 "familyId" to session.familyId,
                 "actorId" to session.userId,
-                "text" to (if (completed) {
-                    "${session.userName} завершил: ${item.title}"
-                } else {
-                    "${session.userName} вернул в список: ${item.title}"
-                }).take(240),
+                "text" to encryptField(
+                    familyKey,
+                    session.familyId,
+                    COLLECTION_EVENTS,
+                    eventRef.id,
+                    "text",
+                    eventText,
+                ),
                 "itemId" to item.id,
                 "createdAt" to FieldValue.serverTimestamp(),
             ),
@@ -277,44 +443,75 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
 
     override suspend fun sendMessage(session: FamilySession, text: String, itemId: String?) {
         val messageRef = familyDoc(session.familyId).collection(COLLECTION_MESSAGES).document()
+        val familyKey = requireFamilyKey(session.familyId)
         messageRef.set(
             mapOf(
                 "id" to messageRef.id,
                 "familyId" to session.familyId,
                 "senderId" to session.userId,
-                "senderName" to session.userName,
-                "text" to text.trim(),
+                "senderName" to encryptField(
+                    familyKey,
+                    session.familyId,
+                    COLLECTION_MESSAGES,
+                    messageRef.id,
+                    "senderName",
+                    session.userName,
+                ),
+                "text" to encryptField(
+                    familyKey,
+                    session.familyId,
+                    COLLECTION_MESSAGES,
+                    messageRef.id,
+                    "text",
+                    text.trim(),
+                ),
                 "itemId" to itemId,
                 "createdAt" to FieldValue.serverTimestamp(),
             ),
         ).await()
     }
 
-    override fun observeItems(familyId: String): Flow<List<FamilyItem>> =
-        familyDoc(familyId)
+    override fun observeItems(familyId: String): Flow<List<FamilyItem>> {
+        val familyKey = requireFamilyKey(familyId)
+        return familyDoc(familyId)
             .collection(COLLECTION_ITEMS)
             .orderBy("updatedAt", Query.Direction.DESCENDING)
-            .asFlow { snapshot -> snapshot.documents.mapNotNull { it.toFamilyItem() } }
+            .asFlow { snapshot ->
+                snapshot.documents.mapNotNull { it.toFamilyItem(familyId, familyKey) }
+            }
+    }
 
-    override fun observeMembers(familyId: String): Flow<List<FamilyMember>> =
-        familyDoc(familyId)
+    override fun observeMembers(familyId: String): Flow<List<FamilyMember>> {
+        val familyKey = requireFamilyKey(familyId)
+        return familyDoc(familyId)
             .collection(COLLECTION_MEMBERS)
             .orderBy("joinedAt", Query.Direction.ASCENDING)
-            .asFlow { snapshot -> snapshot.documents.mapNotNull { it.toFamilyMember() } }
+            .asFlow { snapshot ->
+                snapshot.documents.mapNotNull { it.toFamilyMember(familyId, familyKey) }
+            }
+    }
 
-    override fun observeEvents(familyId: String): Flow<List<ActivityEvent>> =
-        familyDoc(familyId)
+    override fun observeEvents(familyId: String): Flow<List<ActivityEvent>> {
+        val familyKey = requireFamilyKey(familyId)
+        return familyDoc(familyId)
             .collection(COLLECTION_EVENTS)
             .orderBy("createdAt", Query.Direction.DESCENDING)
             .limit(30)
-            .asFlow { snapshot -> snapshot.documents.mapNotNull { it.toActivityEvent() } }
+            .asFlow { snapshot ->
+                snapshot.documents.mapNotNull { it.toActivityEvent(familyId, familyKey) }
+            }
+    }
 
-    override fun observeMessages(familyId: String): Flow<List<FamilyMessage>> =
-        familyDoc(familyId)
+    override fun observeMessages(familyId: String): Flow<List<FamilyMessage>> {
+        val familyKey = requireFamilyKey(familyId)
+        return familyDoc(familyId)
             .collection(COLLECTION_MESSAGES)
             .orderBy("createdAt", Query.Direction.DESCENDING)
             .limit(80)
-            .asFlow { snapshot -> snapshot.documents.mapNotNull { it.toFamilyMessage() }.reversed() }
+            .asFlow { snapshot ->
+                snapshot.documents.mapNotNull { it.toFamilyMessage(familyId, familyKey) }.reversed()
+            }
+    }
 
     private suspend fun saveTokenIfAvailable(familyId: String) {
         runCatching {
@@ -325,22 +522,43 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
 
     private suspend fun addEvent(session: FamilySession, text: String, itemId: String?) {
         val eventRef = familyDoc(session.familyId).collection(COLLECTION_EVENTS).document()
+        val familyKey = requireFamilyKey(session.familyId)
         eventRef.set(
             mapOf(
                 "id" to eventRef.id,
                 "familyId" to session.familyId,
                 "actorId" to session.userId,
-                "text" to text,
+                "text" to encryptField(
+                    familyKey,
+                    session.familyId,
+                    COLLECTION_EVENTS,
+                    eventRef.id,
+                    "text",
+                    text,
+                ),
                 "itemId" to itemId,
                 "createdAt" to FieldValue.serverTimestamp(),
             ),
         ).await()
     }
 
-    private fun memberData(userId: String, userName: String, inviteCode: String): Map<String, Any?> =
+    private fun memberData(
+        familyId: String,
+        userId: String,
+        userName: String,
+        inviteCode: String,
+        familyKey: ByteArray,
+    ): Map<String, Any?> =
         mapOf(
             "uid" to userId,
-            "name" to userName.trim(),
+            "name" to encryptField(
+                familyKey,
+                familyId,
+                COLLECTION_MEMBERS,
+                userId,
+                "name",
+                userName.trim(),
+            ),
             "avatarColor" to avatarColorFor(userName),
             "inviteCode" to inviteCode,
             "fcmToken" to null,
@@ -351,12 +569,99 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
     private fun familyDoc(familyId: String) =
         db.collection(COLLECTION_FAMILIES).document(familyId)
 
-    private fun DocumentSnapshot.toFamilyItem(): FamilyItem? =
+    private suspend fun migrateLegacyContent(session: FamilySession, familyKey: ByteArray) {
+        migrateCollection(session, familyKey, COLLECTION_MEMBERS, listOf("name"))
+        migrateCollection(session, familyKey, COLLECTION_ITEMS, listOf("title"))
+        migrateCollection(session, familyKey, COLLECTION_EVENTS, listOf("text"))
+        migrateCollection(
+            session,
+            familyKey,
+            COLLECTION_MESSAGES,
+            listOf("senderName", "text"),
+        )
+    }
+
+    private suspend fun migrateCollection(
+        session: FamilySession,
+        familyKey: ByteArray,
+        collection: String,
+        fields: List<String>,
+    ) {
+        val snapshot = familyDoc(session.familyId).collection(collection).get().await()
+        snapshot.documents.chunked(MIGRATION_BATCH_SIZE).forEach { documents ->
+            val batch = db.batch()
+            var writeCount = 0
+            documents.forEach { document ->
+                val updates = fields.mapNotNull { field ->
+                    val value = document.getString(field) ?: return@mapNotNull null
+                    if (familyCipher.isEncrypted(value)) return@mapNotNull null
+                    field to encryptField(
+                        familyKey,
+                        session.familyId,
+                        collection,
+                        document.id,
+                        field,
+                        value,
+                    )
+                }.toMap().toMutableMap<String, Any>()
+                if (updates.isEmpty()) return@forEach
+                if (collection == COLLECTION_ITEMS) {
+                    updates["updatedBy"] = session.userId
+                    updates["updatedAt"] = FieldValue.serverTimestamp()
+                }
+                batch.update(document.reference, updates)
+                writeCount += 1
+            }
+            if (writeCount > 0) batch.commit().await()
+        }
+    }
+
+    private fun requireFamilyKey(familyId: String): ByteArray =
+        familyKeyStore.load(familyId)
+            ?: error("На этом устройстве нет ключа семьи. Импортируйте защищенное приглашение")
+
+    private fun encryptField(
+        familyKey: ByteArray,
+        familyId: String,
+        collection: String,
+        documentId: String,
+        field: String,
+        value: String,
+    ): String = familyCipher.encrypt(
+        familyKey,
+        value,
+        FamilyCipher.aad(familyId, collection, documentId, field),
+    )
+
+    private fun decryptField(
+        familyKey: ByteArray,
+        familyId: String,
+        collection: String,
+        documentId: String,
+        field: String,
+        value: String,
+    ): String = familyCipher.decrypt(
+        familyKey,
+        value,
+        FamilyCipher.aad(familyId, collection, documentId, field),
+    )
+
+    private fun DocumentSnapshot.toFamilyItem(
+        familyId: String,
+        familyKey: ByteArray,
+    ): FamilyItem? =
         runCatching {
             FamilyItem(
                 id = getString("id") ?: id,
-                familyId = getString("familyId").orEmpty(),
-                title = getString("title").orEmpty(),
+                familyId = familyId,
+                title = decryptField(
+                    familyKey,
+                    familyId,
+                    COLLECTION_ITEMS,
+                    id,
+                    "title",
+                    getString("title").orEmpty(),
+                ),
                 category = enumValueOf(getString("category") ?: ItemCategory.TASK.name),
                 status = enumValueOf(getString("status") ?: ItemStatus.TODO.name),
                 createdBy = getString("createdBy").orEmpty(),
@@ -368,36 +673,73 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
             )
         }.getOrNull()
 
-    private fun DocumentSnapshot.toFamilyMember(): FamilyMember? =
+    private fun DocumentSnapshot.toFamilyMember(
+        familyId: String,
+        familyKey: ByteArray,
+    ): FamilyMember? =
         runCatching {
             FamilyMember(
                 uid = getString("uid") ?: id,
-                name = getString("name").orEmpty(),
+                name = decryptField(
+                    familyKey,
+                    familyId,
+                    COLLECTION_MEMBERS,
+                    id,
+                    "name",
+                    getString("name").orEmpty(),
+                ),
                 avatarColor = getString("avatarColor") ?: "#587060",
                 joinedAtMillis = timestampMillis("joinedAt"),
             )
         }.getOrNull()
 
-    private fun DocumentSnapshot.toActivityEvent(): ActivityEvent? =
+    private fun DocumentSnapshot.toActivityEvent(
+        familyId: String,
+        familyKey: ByteArray,
+    ): ActivityEvent? =
         runCatching {
             ActivityEvent(
                 id = getString("id") ?: id,
-                familyId = getString("familyId").orEmpty(),
+                familyId = familyId,
                 actorId = getString("actorId").orEmpty(),
-                text = getString("text").orEmpty(),
+                text = decryptField(
+                    familyKey,
+                    familyId,
+                    COLLECTION_EVENTS,
+                    id,
+                    "text",
+                    getString("text").orEmpty(),
+                ),
                 itemId = getString("itemId"),
                 createdAtMillis = timestampMillis("createdAt"),
             )
         }.getOrNull()
 
-    private fun DocumentSnapshot.toFamilyMessage(): FamilyMessage? =
+    private fun DocumentSnapshot.toFamilyMessage(
+        familyId: String,
+        familyKey: ByteArray,
+    ): FamilyMessage? =
         runCatching {
             FamilyMessage(
                 id = getString("id") ?: id,
-                familyId = getString("familyId").orEmpty(),
+                familyId = familyId,
                 senderId = getString("senderId").orEmpty(),
-                senderName = getString("senderName").orEmpty(),
-                text = getString("text").orEmpty(),
+                senderName = decryptField(
+                    familyKey,
+                    familyId,
+                    COLLECTION_MESSAGES,
+                    id,
+                    "senderName",
+                    getString("senderName").orEmpty(),
+                ),
+                text = decryptField(
+                    familyKey,
+                    familyId,
+                    COLLECTION_MESSAGES,
+                    id,
+                    "text",
+                    getString("text").orEmpty(),
+                ),
                 itemId = getString("itemId"),
                 createdAtMillis = timestampMillis("createdAt"),
             )
@@ -414,7 +756,9 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
-                    trySend(mapper(snapshot))
+                    runCatching { mapper(snapshot) }
+                        .onSuccess { trySend(it) }
+                        .onFailure { close(it) }
                 }
             }
             awaitClose { registration.remove() }
@@ -427,6 +771,7 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
         const val COLLECTION_ITEMS = "items"
         const val COLLECTION_EVENTS = "events"
         const val COLLECTION_MESSAGES = "messages"
+        const val MIGRATION_BATCH_SIZE = 400
 
         fun generateInviteCode(): String {
             val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"

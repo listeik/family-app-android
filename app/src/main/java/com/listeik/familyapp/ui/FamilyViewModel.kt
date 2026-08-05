@@ -7,6 +7,7 @@ import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
 import com.listeik.familyapp.data.model.FamilyMember
 import com.listeik.familyapp.data.model.FamilyMessage
+import com.listeik.familyapp.data.model.FamilySecurityState
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
 import com.listeik.familyapp.data.repository.FamilyRepository
@@ -24,6 +25,8 @@ data class FamilyUiState(
     val isLoading: Boolean = true,
     val isWorking: Boolean = false,
     val session: FamilySession? = null,
+    val securityState: FamilySecurityState? = null,
+    val secureInvite: String? = null,
     val members: List<FamilyMember> = emptyList(),
     val items: List<FamilyItem> = emptyList(),
     val events: List<ActivityEvent> = emptyList(),
@@ -43,10 +46,23 @@ class FamilyViewModel(
         viewModelScope.launch {
             runCatching {
                 val userId = repository.ensureSignedIn()
-                repository.loadSavedSession(userId)
-            }.onSuccess { session ->
-                _uiState.update { it.copy(isLoading = false, session = session) }
-                session?.let(::observeFamily)
+                val session = repository.loadSavedSession(userId)
+                val securityState = session?.let { repository.getSecurityState(it) }
+                session to securityState
+            }.onSuccess { (session, securityState) ->
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        session = session,
+                        securityState = securityState,
+                        secureInvite = session
+                            ?.takeIf { securityState?.isReady == true }
+                            ?.let(repository::getSecureInvite),
+                    )
+                }
+                if (session != null && securityState?.isReady == true) {
+                    observeFamily(session)
+                }
             }.onFailure(::showFailure)
         }
     }
@@ -70,6 +86,38 @@ class FamilyViewModel(
         runAction {
             val session = repository.joinFamily(inviteCode, userName)
             activateSession(session)
+        }
+    }
+
+    fun enableEncryption() {
+        val session = _uiState.value.session ?: return
+        runAction {
+            repository.enableEncryption(session)
+            activateSession(session)
+        }
+    }
+
+    fun importSecurityKey(secureInvite: String) {
+        val session = _uiState.value.session ?: return
+        if (secureInvite.isBlank()) {
+            showMessage("Вставьте полное защищенное приглашение")
+            return
+        }
+        runAction {
+            repository.importSecurityKey(session, secureInvite)
+            activateSession(session)
+        }
+    }
+
+    fun leaveFamily() {
+        val session = _uiState.value.session ?: return
+        runAction {
+            repository.leaveFamily(session)
+            observationJobs.forEach(Job::cancel)
+            observationJobs.clear()
+            _uiState.update {
+                FamilyUiState(isLoading = false, isWorking = true)
+            }
         }
     }
 
@@ -118,7 +166,17 @@ class FamilyViewModel(
     }
 
     private fun activateSession(session: FamilySession) {
-        _uiState.update { it.copy(session = session) }
+        _uiState.update {
+            it.copy(
+                session = session,
+                securityState = FamilySecurityState(
+                    isEnabled = true,
+                    hasLocalKey = true,
+                    canEnable = false,
+                ),
+                secureInvite = repository.getSecureInvite(session),
+            )
+        }
         observeFamily(session)
     }
 

@@ -16,8 +16,8 @@ android {
         applicationId = "com.listeik.familyapp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     buildFeatures {
@@ -52,4 +52,5 @@ dependencies {
     implementation(libs.firebase.messaging)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }

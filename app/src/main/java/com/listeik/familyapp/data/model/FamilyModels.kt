@@ -51,6 +51,15 @@ data class FamilySession(
     val userName: String,
 )
 
+data class FamilySecurityState(
+    val isEnabled: Boolean,
+    val hasLocalKey: Boolean,
+    val canEnable: Boolean,
+) {
+    val isReady: Boolean
+        get() = isEnabled && hasLocalKey
+}
+
 data class FamilyMember(
     val uid: String,
     val name: String,
