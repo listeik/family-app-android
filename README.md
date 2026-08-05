@@ -25,12 +25,9 @@
 
 ## Подключение Firebase
 
-1. Создайте проект Firebase.
-2. Добавьте Android-приложение с package name `com.listeik.familyapp`.
-3. Скачайте `google-services.json`.
-4. Поместите файл в `app/google-services.json`.
-5. Включите анонимный способ входа в Firebase Authentication.
-6. Разверните правила Firestore из репозитория backend.
+Рабочее приложение зарегистрировано в Firebase-проекте `family-app-listeik` с package name `com.listeik.familyapp`. Анонимный вход и Firestore уже настроены, правила опубликованы из репозитория backend.
+
+Для локального запуска скачайте актуальный `google-services.json` из Firebase Console и поместите его в `app/google-services.json`.
 
 Без `google-services.json` проект всё равно собирается, но вместо подключения к Firebase показывает экран настройки.
 
