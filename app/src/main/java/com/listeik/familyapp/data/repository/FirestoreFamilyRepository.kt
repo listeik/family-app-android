@@ -328,7 +328,7 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
 
         fun avatarColorFor(seed: String): String {
             val colors = listOf("#2D6CDF", "#2E7D32", "#C62828", "#6A4C93", "#B26A00")
-            return colors[seed.hashCode().let { kotlin.math.abs(it) } % colors.size]
+            return colors[Math.floorMod(seed.hashCode(), colors.size)]
         }
     }
 }

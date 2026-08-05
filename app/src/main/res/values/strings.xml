@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Family App</string>
+    <string name="notification_channel_name">Семейные обновления</string>
 </resources>
