@@ -1,5 +1,7 @@
 package com.listeik.familyapp.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,7 +30,6 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
@@ -43,14 +44,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -73,9 +70,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -84,7 +84,6 @@ import com.listeik.familyapp.data.model.FamilyItem
 import com.listeik.familyapp.data.model.FamilyMessage
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
-import com.listeik.familyapp.data.model.ItemStatus
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -99,6 +98,16 @@ private enum class OnboardingMode(val label: String) {
     CREATE("Создать семью"),
     JOIN("Войти по коду"),
 }
+
+@Composable
+private fun familyBackgroundBrush(): Brush =
+    Brush.verticalGradient(
+        if (isSystemInDarkTheme()) {
+            listOf(Color(0xFF17231A), MaterialTheme.colorScheme.background, Color(0xFF231E18))
+        } else {
+            listOf(Color(0xFFF1F9F0), MaterialTheme.colorScheme.background, Color(0xFFFFFAF3))
+        },
+    )
 
 @Composable
 fun FamilyApp(viewModel: FamilyViewModel) {
@@ -124,6 +133,8 @@ fun FamilyApp(viewModel: FamilyViewModel) {
                 state = state,
                 onCreateItem = viewModel::createItem,
                 onMoveItemForward = viewModel::moveItemForward,
+                onAdjustFoodPortions = viewModel::adjustFoodPortions,
+                onSetItemCompleted = viewModel::setItemCompleted,
                 onDeleteItem = viewModel::deleteItem,
                 onSendMessage = viewModel::sendMessage,
             )
@@ -172,7 +183,10 @@ fun FirebaseSetupScreen() {
 
 @Composable
 private fun LoadingScreen() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        modifier = Modifier.fillMaxSize().background(familyBackgroundBrush()),
+        contentAlignment = Alignment.Center,
+    ) {
         LinearProgressIndicator(modifier = Modifier.width(180.dp))
     }
 }
@@ -192,6 +206,7 @@ private fun OnboardingScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(familyBackgroundBrush())
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -287,6 +302,8 @@ private fun FamilyHome(
     state: FamilyUiState,
     onCreateItem: (String, ItemCategory, Int?) -> Unit,
     onMoveItemForward: (FamilyItem) -> Unit,
+    onAdjustFoodPortions: (FamilyItem, Int) -> Unit,
+    onSetItemCompleted: (FamilyItem, Boolean) -> Unit,
     onDeleteItem: (FamilyItem) -> Unit,
     onSendMessage: (String) -> Unit,
 ) {
@@ -299,18 +316,16 @@ private fun FamilyHome(
             Column {
                 CenterAlignedTopAppBar(
                     title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                session.familyName,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                "Код: ${session.inviteCode}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                        Text(
+                            when (selectedTab) {
+                                HomeTab.BOARD -> "Домашний круг"
+                                HomeTab.CHAT -> "Семейный чат"
+                                HomeTab.ACTIVITY -> "История"
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     },
                 )
                 if (state.isWorking) {
@@ -332,7 +347,10 @@ private fun FamilyHome(
         },
         floatingActionButton = {
             if (selectedTab == HomeTab.BOARD) {
-                FloatingActionButton(onClick = { showCreateDialog = true }) {
+                FloatingActionButton(
+                    onClick = { showCreateDialog = true },
+                    shape = CircleShape,
+                ) {
                     Icon(Icons.Default.Add, contentDescription = "Добавить")
                 }
             }
@@ -341,8 +359,11 @@ private fun FamilyHome(
         when (selectedTab) {
             HomeTab.BOARD -> DashboardScreen(
                 session = session,
+                members = state.members,
                 items = state.items,
                 events = state.events,
+                onAdjustFoodPortions = onAdjustFoodPortions,
+                onSetItemCompleted = onSetItemCompleted,
                 onMoveItemForward = onMoveItemForward,
                 onDeleteItem = onDeleteItem,
                 contentPadding = padding,
@@ -369,175 +390,6 @@ private fun FamilyHome(
 }
 
 @Composable
-private fun DashboardScreen(
-    session: FamilySession,
-    items: List<FamilyItem>,
-    events: List<ActivityEvent>,
-    onMoveItemForward: (FamilyItem) -> Unit,
-    onDeleteItem: (FamilyItem) -> Unit,
-    contentPadding: PaddingValues,
-) {
-    var selectedCategory by rememberSaveable { mutableStateOf<ItemCategory?>(null) }
-    val visibleItems = remember(items, selectedCategory) {
-        selectedCategory?.let { category -> items.filter { it.category == category } } ?: items
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 16.dp,
-            top = contentPadding.calculateTopPadding() + 12.dp,
-            end = 16.dp,
-            bottom = contentPadding.calculateBottomPadding() + 88.dp,
-        ),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        item {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                item {
-                    FilterChip(
-                        selected = selectedCategory == null,
-                        onClick = { selectedCategory = null },
-                        label = { Text("Все") },
-                    )
-                }
-                items(ItemCategory.entries) { category ->
-                    FilterChip(
-                        selected = selectedCategory == category,
-                        onClick = { selectedCategory = category },
-                        leadingIcon = {
-                            Icon(
-                                categoryIcon(category),
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        },
-                        label = { Text(category.label) },
-                    )
-                }
-            }
-        }
-        if (visibleItems.isEmpty()) {
-            item { EmptyBoard() }
-        } else {
-            items(visibleItems, key = { it.id }) { item ->
-                FamilyItemCard(
-                    item = item,
-                    canDelete = item.createdBy == session.userId,
-                    onMoveForward = { onMoveItemForward(item) },
-                    onDelete = { onDeleteItem(item) },
-                )
-            }
-        }
-        if (events.isNotEmpty()) {
-            item {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Последние события",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            items(events.take(3), key = { "event-${it.id}" }) { event ->
-                EventRow(event)
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyBoard() {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 56.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Icon(
-            Icons.Default.Checklist,
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            tint = MaterialTheme.colorScheme.primary,
-        )
-        Spacer(Modifier.height(12.dp))
-        Text("Пока всё спокойно", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "Добавьте первое семейное дело",
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun FamilyItemCard(
-    item: FamilyItem,
-    canDelete: Boolean,
-    onMoveForward: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(40.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            categoryIcon(item.category),
-                            contentDescription = null,
-                            modifier = Modifier.size(21.dp),
-                        )
-                    }
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        item.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            item.status.label,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        item.remainingPortions?.let {
-                            Text(
-                                "Осталось: $it",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-                if (canDelete) {
-                    IconButton(onClick = onDelete) {
-                        Icon(Icons.Default.DeleteOutline, contentDescription = "Удалить")
-                    }
-                }
-            }
-            if (!item.isComplete()) {
-                Spacer(Modifier.height(12.dp))
-                FilledTonalButton(
-                    onClick = onMoveForward,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(item.actionLabel())
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun ChatScreen(
     session: FamilySession,
     messages: List<FamilyMessage>,
@@ -554,6 +406,7 @@ private fun ChatScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(familyBackgroundBrush())
             .padding(top = contentPadding.calculateTopPadding(), bottom = contentPadding.calculateBottomPadding())
             .imePadding(),
     ) {
@@ -579,27 +432,44 @@ private fun ChatScreen(
                 MessageBubble(message, isMine = message.senderId == session.userId)
             }
         }
-        HorizontalDivider()
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Surface(
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+            shadowElevation = 4.dp,
         ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it.take(500) },
-                placeholder = { Text("Сообщение") },
-                maxLines = 4,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    onSendMessage(text)
-                    text = ""
-                },
-                enabled = text.isNotBlank(),
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Отправить")
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.take(500) },
+                    placeholder = { Text("Сообщение") },
+                    maxLines = 4,
+                    shape = RoundedCornerShape(22.dp),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(
+                    onClick = {
+                        onSendMessage(text)
+                        text = ""
+                    },
+                    enabled = text.isNotBlank(),
+                    modifier = Modifier.size(48.dp).background(
+                        if (text.isNotBlank()) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        CircleShape,
+                    ),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Отправить",
+                        tint = if (text.isNotBlank()) Color.White else MaterialTheme.colorScheme.outline,
+                    )
+                }
             }
         }
     }
@@ -612,7 +482,7 @@ private fun MessageBubble(message: FamilyMessage, isMine: Boolean) {
             modifier = Modifier
                 .widthIn(max = 320.dp)
                 .align(if (isMine) Alignment.CenterEnd else Alignment.CenterStart),
-            shape = RoundedCornerShape(8.dp),
+            shape = RoundedCornerShape(22.dp),
             colors = CardDefaults.cardColors(
                 containerColor = if (isMine) {
                     MaterialTheme.colorScheme.primaryContainer
@@ -644,13 +514,14 @@ private fun MessageBubble(message: FamilyMessage, isMine: Boolean) {
 @Composable
 private fun ActivityScreen(events: List<ActivityEvent>, contentPadding: PaddingValues) {
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().background(familyBackgroundBrush()),
         contentPadding = PaddingValues(
-            start = 12.dp,
-            top = contentPadding.calculateTopPadding() + 8.dp,
-            end = 12.dp,
-            bottom = contentPadding.calculateBottomPadding() + 8.dp,
+            start = 16.dp,
+            top = contentPadding.calculateTopPadding() + 12.dp,
+            end = 16.dp,
+            bottom = contentPadding.calculateBottomPadding() + 16.dp,
         ),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (events.isEmpty()) {
             item {
@@ -666,28 +537,43 @@ private fun ActivityScreen(events: List<ActivityEvent>, contentPadding: PaddingV
         }
         items(events, key = { it.id }) { event ->
             EventRow(event)
-            HorizontalDivider(modifier = Modifier.padding(start = 52.dp))
         }
     }
 }
 
 @Composable
 private fun EventRow(event: ActivityEvent) {
-    ListItem(
-        headlineContent = { Text(event.text) },
-        supportingContent = { Text(formatDateTime(event.createdAtMillis)) },
-        leadingContent = {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.secondaryContainer,
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier.size(40.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(19.dp))
                 }
             }
-        },
-    )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(event.text, style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    formatDateTime(event.createdAtMillis),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -739,7 +625,9 @@ private fun CreateItemDialog(
                     OutlinedTextField(
                         value = portions,
                         onValueChange = { value -> portions = value.filter(Char::isDigit).take(3) },
-                        label = { Text("Количество порций") },
+                        label = { Text("Количество в холодильнике") },
+                        placeholder = { Text("Например, 8") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -749,7 +637,8 @@ private fun CreateItemDialog(
         confirmButton = {
             Button(
                 onClick = { onCreate(title, category, portions.toIntOrNull()) },
-                enabled = title.isNotBlank(),
+                enabled = title.isNotBlank() &&
+                    (category != ItemCategory.FOOD || portions.toIntOrNull() != null),
             ) {
                 Text("Добавить")
             }
@@ -757,7 +646,7 @@ private fun CreateItemDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Отмена") }
         },
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(28.dp),
     )
 }
 
@@ -767,23 +656,6 @@ private fun categoryIcon(category: ItemCategory): ImageVector =
         ItemCategory.BUY -> Icons.Default.ShoppingCart
         ItemCategory.TASK -> Icons.Default.Checklist
         ItemCategory.WISH -> Icons.Default.Redeem
-    }
-
-private fun FamilyItem.isComplete(): Boolean =
-    status in setOf(ItemStatus.FINISHED, ItemStatus.BOUGHT, ItemStatus.DONE, ItemStatus.ARCHIVED)
-
-private fun FamilyItem.actionLabel(): String =
-    when (category) {
-        ItemCategory.FOOD -> if (remainingPortions != null) "Съел порцию" else when (status) {
-            ItemStatus.READY -> "Начать есть"
-            else -> "Закончить"
-        }
-        ItemCategory.BUY -> when (status) {
-            ItemStatus.NEED_TO_BUY -> "В корзину"
-            else -> "Куплено"
-        }
-        ItemCategory.TASK -> "Готово"
-        ItemCategory.WISH -> "Закрыть"
     }
 
 private fun formatTime(timestamp: Long): String =
