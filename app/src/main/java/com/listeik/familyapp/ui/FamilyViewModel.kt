@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
+import com.listeik.familyapp.data.model.FamilyMember
 import com.listeik.familyapp.data.model.FamilyMessage
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
@@ -23,6 +24,7 @@ data class FamilyUiState(
     val isLoading: Boolean = true,
     val isWorking: Boolean = false,
     val session: FamilySession? = null,
+    val members: List<FamilyMember> = emptyList(),
     val items: List<FamilyItem> = emptyList(),
     val events: List<ActivityEvent> = emptyList(),
     val messages: List<FamilyMessage> = emptyList(),
@@ -77,12 +79,27 @@ class FamilyViewModel(
             showMessage("Введите название")
             return
         }
+        if (category == ItemCategory.FOOD && (portions == null || portions <= 0)) {
+            showMessage("Укажите количество порций")
+            return
+        }
         runAction { repository.createItem(session, title, category, portions) }
     }
 
     fun moveItemForward(item: FamilyItem) {
         val session = _uiState.value.session ?: return
         runAction { repository.moveItemForward(session, item) }
+    }
+
+    fun adjustFoodPortions(item: FamilyItem, delta: Int) {
+        val session = _uiState.value.session ?: return
+        if (delta !in setOf(-1, 1)) return
+        runAction { repository.adjustFoodPortions(session, item, delta) }
+    }
+
+    fun setItemCompleted(item: FamilyItem, completed: Boolean) {
+        val session = _uiState.value.session ?: return
+        runAction { repository.setItemCompleted(session, item, completed) }
     }
 
     fun deleteItem(item: FamilyItem) {
@@ -111,6 +128,10 @@ class FamilyViewModel(
 
         observationJobs += repository.observeItems(session.familyId)
             .onEach { items -> _uiState.update { it.copy(items = items) } }
+            .catch { showFailure(it) }
+            .launchIn(viewModelScope)
+        observationJobs += repository.observeMembers(session.familyId)
+            .onEach { members -> _uiState.update { it.copy(members = members) } }
             .catch { showFailure(it) }
             .launchIn(viewModelScope)
         observationJobs += repository.observeEvents(session.familyId)

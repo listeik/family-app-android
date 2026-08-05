@@ -2,6 +2,7 @@ package com.listeik.familyapp.data.repository
 
 import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
+import com.listeik.familyapp.data.model.FamilyMember
 import com.listeik.familyapp.data.model.FamilyMessage
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
@@ -21,9 +22,12 @@ interface FamilyRepository {
     )
 
     suspend fun moveItemForward(session: FamilySession, item: FamilyItem)
+    suspend fun adjustFoodPortions(session: FamilySession, item: FamilyItem, delta: Int)
+    suspend fun setItemCompleted(session: FamilySession, item: FamilyItem, completed: Boolean)
     suspend fun deleteItem(session: FamilySession, item: FamilyItem)
     suspend fun sendMessage(session: FamilySession, text: String, itemId: String? = null)
     fun observeItems(familyId: String): Flow<List<FamilyItem>>
+    fun observeMembers(familyId: String): Flow<List<FamilyMember>>
     fun observeEvents(familyId: String): Flow<List<ActivityEvent>>
     fun observeMessages(familyId: String): Flow<List<FamilyMessage>>
 }

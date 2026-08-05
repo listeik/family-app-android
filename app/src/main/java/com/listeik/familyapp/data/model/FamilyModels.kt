@@ -51,6 +51,13 @@ data class FamilySession(
     val userName: String,
 )
 
+data class FamilyMember(
+    val uid: String,
+    val name: String,
+    val avatarColor: String,
+    val joinedAtMillis: Long,
+)
+
 data class FamilyItem(
     val id: String,
     val familyId: String,

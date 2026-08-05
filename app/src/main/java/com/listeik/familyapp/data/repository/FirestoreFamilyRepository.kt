@@ -10,6 +10,7 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.messaging.FirebaseMessaging
 import com.listeik.familyapp.data.model.ActivityEvent
 import com.listeik.familyapp.data.model.FamilyItem
+import com.listeik.familyapp.data.model.FamilyMember
 import com.listeik.familyapp.data.model.FamilyMessage
 import com.listeik.familyapp.data.model.FamilySession
 import com.listeik.familyapp.data.model.ItemCategory
@@ -175,6 +176,100 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
         addEvent(session, "${session.userName}: ${item.title} теперь $statusLabel", item.id)
     }
 
+    override suspend fun adjustFoodPortions(
+        session: FamilySession,
+        item: FamilyItem,
+        delta: Int,
+    ) {
+        require(item.category == ItemCategory.FOOD && delta in setOf(-1, 1))
+        val itemRef = familyDoc(session.familyId).collection(COLLECTION_ITEMS).document(item.id)
+        val eventRef = familyDoc(session.familyId).collection(COLLECTION_EVENTS).document()
+
+        db.runTransaction { transaction ->
+            val snapshot = transaction.get(itemRef)
+            val total = snapshot.getLong("totalPortions")?.toInt()?.coerceIn(1, 100)
+                ?: return@runTransaction Unit
+            val current = snapshot.getLong("remainingPortions")?.toInt()?.coerceIn(0, total)
+                ?: return@runTransaction Unit
+            val next = (current + delta).coerceIn(0, total)
+            if (next == current) return@runTransaction Unit
+
+            val nextStatus = when (next) {
+                0 -> ItemStatus.FINISHED
+                total -> ItemStatus.READY
+                else -> ItemStatus.IN_PROGRESS
+            }
+            val action = if (delta < 0) "съел порцию" else "вернул порцию"
+
+            transaction.update(
+                itemRef,
+                mapOf(
+                    "remainingPortions" to next,
+                    "status" to nextStatus.name,
+                    "updatedBy" to session.userId,
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                ),
+            )
+            transaction.set(
+                eventRef,
+                mapOf(
+                    "id" to eventRef.id,
+                    "familyId" to session.familyId,
+                    "actorId" to session.userId,
+                    "text" to "${session.userName} $action: ${item.title} · осталось $next из $total".take(240),
+                    "itemId" to item.id,
+                    "createdAt" to FieldValue.serverTimestamp(),
+                ),
+            )
+        }.await()
+    }
+
+    override suspend fun setItemCompleted(
+        session: FamilySession,
+        item: FamilyItem,
+        completed: Boolean,
+    ) {
+        val targetStatus = if (completed) {
+            when (item.category) {
+                ItemCategory.FOOD -> ItemStatus.FINISHED
+                ItemCategory.BUY -> ItemStatus.BOUGHT
+                ItemCategory.TASK -> ItemStatus.DONE
+                ItemCategory.WISH -> ItemStatus.ARCHIVED
+            }
+        } else {
+            item.category.defaultStatus
+        }
+        if (targetStatus == item.status) return
+
+        val itemRef = familyDoc(session.familyId).collection(COLLECTION_ITEMS).document(item.id)
+        val eventRef = familyDoc(session.familyId).collection(COLLECTION_EVENTS).document()
+        val batch = db.batch()
+        batch.update(
+            itemRef,
+            mapOf(
+                "status" to targetStatus.name,
+                "updatedBy" to session.userId,
+                "updatedAt" to FieldValue.serverTimestamp(),
+            ),
+        )
+        batch.set(
+            eventRef,
+            mapOf(
+                "id" to eventRef.id,
+                "familyId" to session.familyId,
+                "actorId" to session.userId,
+                "text" to (if (completed) {
+                    "${session.userName} завершил: ${item.title}"
+                } else {
+                    "${session.userName} вернул в список: ${item.title}"
+                }).take(240),
+                "itemId" to item.id,
+                "createdAt" to FieldValue.serverTimestamp(),
+            ),
+        )
+        batch.commit().await()
+    }
+
     override suspend fun deleteItem(session: FamilySession, item: FamilyItem) {
         familyDoc(session.familyId).collection(COLLECTION_ITEMS).document(item.id).delete().await()
         addEvent(session, "${session.userName} удалил: ${item.title}", item.id)
@@ -200,6 +295,12 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
             .collection(COLLECTION_ITEMS)
             .orderBy("updatedAt", Query.Direction.DESCENDING)
             .asFlow { snapshot -> snapshot.documents.mapNotNull { it.toFamilyItem() } }
+
+    override fun observeMembers(familyId: String): Flow<List<FamilyMember>> =
+        familyDoc(familyId)
+            .collection(COLLECTION_MEMBERS)
+            .orderBy("joinedAt", Query.Direction.ASCENDING)
+            .asFlow { snapshot -> snapshot.documents.mapNotNull { it.toFamilyMember() } }
 
     override fun observeEvents(familyId: String): Flow<List<ActivityEvent>> =
         familyDoc(familyId)
@@ -264,6 +365,16 @@ class FirestoreFamilyRepository(context: Context) : FamilyRepository {
                 updatedAtMillis = timestampMillis("updatedAt"),
                 totalPortions = getLong("totalPortions")?.toInt(),
                 remainingPortions = getLong("remainingPortions")?.toInt(),
+            )
+        }.getOrNull()
+
+    private fun DocumentSnapshot.toFamilyMember(): FamilyMember? =
+        runCatching {
+            FamilyMember(
+                uid = getString("uid") ?: id,
+                name = getString("name").orEmpty(),
+                avatarColor = getString("avatarColor") ?: "#587060",
+                joinedAtMillis = timestampMillis("joinedAt"),
             )
         }.getOrNull()
 
